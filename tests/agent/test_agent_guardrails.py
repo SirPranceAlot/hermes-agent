@@ -8,6 +8,7 @@ Covers three static methods on AIAgent (inspired by PR #1321 — @alireza78a):
 """
 
 import types
+from typing import Any
 
 import pytest
 
@@ -35,7 +36,7 @@ def _pin_max_concurrent_children(monkeypatch):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def make_tc(name: str, arguments: str = "{}") -> types.SimpleNamespace:
+def make_tc(name: str, arguments: Any = "{}") -> types.SimpleNamespace:
     """Create a minimal tool_call SimpleNamespace mirroring the OpenAI SDK object."""
     tc = types.SimpleNamespace()
     tc.function = types.SimpleNamespace(name=name, arguments=arguments)
@@ -242,6 +243,25 @@ class TestDeduplicateToolCalls:
 
     def test_empty_list_safe(self):
         assert AIAgent._deduplicate_tool_calls([]) == []
+
+    def test_dict_plus_equal_dict_deduplicated(self):
+        args = {"query": "foo", "limit": 10}
+        first = make_tc("web_search", dict(args))
+        second = make_tc("web_search", dict(args))
+        out = AIAgent._deduplicate_tool_calls([first, second])
+        assert out == [first]
+
+    def test_string_plus_equivalent_dict_deduplicated(self):
+        first = make_tc("web_search", '{"limit":10,"query":"foo"}')
+        second = make_tc("web_search", {"query": "foo", "limit": 10})
+        out = AIAgent._deduplicate_tool_calls([first, second])
+        assert out == [first]
+
+    def test_distinct_dicts_are_preserved(self):
+        first = make_tc("web_search", {"query": "one"})
+        second = make_tc("web_search", {"query": "two"})
+        out = AIAgent._deduplicate_tool_calls([first, second])
+        assert out == [first, second]
 
 
 # ---------------------------------------------------------------------------
