@@ -1222,9 +1222,10 @@ class AIAgent(
         for tc in tool_calls:
             arguments = tc.function.arguments
             try:
-                arguments = json.dumps(json.loads(arguments), separators=(",", ":"), sort_keys=True)
+                parsed = json.loads(arguments) if isinstance(arguments, str) else arguments
+                arguments = json.dumps(parsed, separators=(",", ":"), sort_keys=True, default=str)
             except (TypeError, ValueError):
-                pass
+                arguments = arguments if isinstance(arguments, str) else repr(arguments)
             key = (tc.function.name, arguments)
             if key in seen:
                 logger.warning("Removed duplicate tool call: %s", tc.function.name)
