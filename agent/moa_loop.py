@@ -210,7 +210,14 @@ _REFERENCE_SYSTEM_PROMPT = (
     "tool-call object, because the aggregator replays what looks like one. "
     "Your response is private guidance handed to the "
     "aggregator, not an answer shown to the user. NEVER claim to have executed "
-    "anything."
+    "anything.\n\n"
+    "Start your response with exactly these three lines, then your reasoning:\n"
+    "STATUS: on_track | looping | off_track | blocked | done\n"
+    "NEXT: <one concrete next step, or \"answer the user now\">\n"
+    "AVOID: <tool name + key argument that must not be repeated, or \"none\">\n"
+    "Before choosing STATUS, compare the last several tool calls: the same tool with the "
+    "same or near-same arguments and no new information means looping. Name the exact "
+    "call in AVOID."
 )
 
 
@@ -674,7 +681,8 @@ def _render_tool_calls(tool_calls: Any) -> str:
 _STALE_GUIDANCE_NOTE = (
     "This guidance was produced earlier in this turn, before the tool results below it. "
     "Check the transcript before acting on it: a step it suggests may already have run, and "
-    "repeating a completed tool call is never the next step.\n"
+    "repeating a completed tool call is never the next step. "
+    "NEXT may already be done, but AVOID entries and loop warnings still apply.\n"
 )
 
 
@@ -682,7 +690,7 @@ _ADVISORY_INSTRUCTION = (
     "[The conversation above is the current state of the task. Give your "
     "most intelligent judgement: what is going on, what should happen next, "
     "what risks or mistakes you see, and how the acting agent should "
-    "proceed.]"
+    "proceed. Begin with the STATUS / NEXT / AVOID lines.]"
 )
 
 
@@ -1352,8 +1360,10 @@ class MoAChatCompletions:
             return (
                 f"{header}"
                 f"References: {', '.join(label for label, _, _ in agg_refs)}\n\n"
-                "Use the reference responses below as private context. You are the aggregator and acting model: "
-                "answer the user directly or call tools as needed.\n"
+                "Advisor guidance follows. You are the acting model. Before your next action:\n"
+                "1. Read each advisor's STATUS, NEXT, and AVOID lines.\n"
+                "2. If any STATUS is looping or off_track, do not repeat anything listed in AVOID; change approach or answer the user.\n"
+                "3. If you do not follow NEXT, state why in one sentence first.\n"
                 f"{_STALE_GUIDANCE_NOTE if stale else ''}\n"
                 f"{_join_reference_outputs(agg_refs, degraded)}"
             )

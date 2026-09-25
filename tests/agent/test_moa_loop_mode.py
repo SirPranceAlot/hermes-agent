@@ -524,6 +524,27 @@ def test_run_reference_prepends_advisory_system_prompt(monkeypatch):
     msgs = captured["messages"]
     assert msgs[0] == {"role": "system", "content": _REFERENCE_SYSTEM_PROMPT}
     assert msgs[-1]["role"] == "user"
+    assert "STATUS:" in _REFERENCE_SYSTEM_PROMPT
+    assert "NEXT:" in _REFERENCE_SYSTEM_PROMPT
+    assert "AVOID:" in _REFERENCE_SYSTEM_PROMPT
+
+
+def test_build_guidance_uses_directive_wrapper():
+    """Aggregator guidance is a rule list, not optional background."""
+    from agent.moa_loop import MoAChatCompletions, _RefAccounting
+
+    facade = MoAChatCompletions.__new__(MoAChatCompletions)
+    facade.preset_name = "review"
+    facade._privacy_mode = ""
+    guidance = facade._build_guidance(
+        [("anthropic:claude-opus-5-5", "STATUS: looping\nNEXT: answer the user now\nAVOID: skill_view(simple-english)", _RefAccounting(None))],
+        {"provider": "openrouter", "model": "anthropic/claude-opus-4.8"},
+        "loud",
+    )
+    assert guidance is not None
+    assert guidance.startswith("[Mixture of Agents reference context]")
+    assert "Advisor guidance follows" in guidance
+    assert "state why in one sentence" in guidance
 
 
 
