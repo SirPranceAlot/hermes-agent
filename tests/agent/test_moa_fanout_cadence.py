@@ -91,6 +91,36 @@ def test_every_n_cadence_runs_references_every_nth_iteration(monkeypatch, tmp_pa
     assert events.count("moa.aggregating") == 2
 
 
+def test_user_turn_fanout_does_not_restart_when_repeat_evidence_appears(monkeypatch, tmp_path):
+    home = tmp_path / ".hermes"
+    _cadence_config(home, "user_turn")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    ref_runs = []
+    _install_fake_llm(monkeypatch, ref_runs)
+
+    from agent.moa_loop import MoAChatCompletions
+
+    facade = MoAChatCompletions("review")
+    messages = [{"role": "user", "content": "check the page"}]
+    for index in range(3):
+        call_id = f"read-{index}"
+        messages.extend([
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": call_id,
+                    "function": {"name": "read_file", "arguments": '{"path":"page.md"}'},
+                }],
+            },
+            {"role": "tool", "tool_call_id": call_id, "content": "same page contents"},
+        ])
+        facade.create(messages=list(messages), tools=[], _moa_prepare_only=True)
+
+    assert len(ref_runs) == 1
+
+
 def test_every_n_off_cadence_iterations_reuse_cached_guidance(monkeypatch, tmp_path):
     """Off-cadence iterations must still give the aggregator the last
     on-cadence advisor guidance (cache reuse), not run advisor-less."""

@@ -216,9 +216,11 @@ _REFERENCE_SYSTEM_PROMPT = (
     "STATUS: on_track | looping | off_track | blocked | done\n"
     "NEXT: <one concrete next step, or \"answer the user now\">\n"
     "AVOID: <tool name + key argument that must not be repeated, or \"none\">\n"
-    "Before choosing STATUS, compare the last several tool calls: the same tool with the "
-    "same or near-same arguments and no new information means looping. Name the exact "
-    "call in AVOID."
+    "Use STATUS: looping only when the Hermes repeat evidence block lists the call. "
+    "Otherwise, mention a possible repeat in your reasoning and keep STATUS on_track. "
+    "Use only exact tool arguments and identical full results as repeat evidence. "
+    "Do not count a read after a write, a retry after an error, a skill reload after "
+    "[SKILL_PRUNED], or a process poll as a loop."
 )
 
 
@@ -708,6 +710,104 @@ def _tool_activity_since_last_user(messages: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _repeat_evidence(messages: list[dict[str, Any]]) -> str:
+    """Report exact, no-progress tool repeats from the current user turn only.
+
+    A loop needs three completed calls with identical canonical arguments and
+    identical full results. Successful writes reset all repeat streaks. Failed
+    calls, pruned skill markers, and process polls do not count.
+    """
+    from agent.tool_guardrails import MUTATING_TOOL_NAMES, classify_tool_failure, is_stall_guard_repeatable
+
+    last_user = next((i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") == "user"), None)
+    if last_user is None:
+        return ""
+
+    def _decoded(value: Any) -> Any:
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except (TypeError, ValueError):
+                return value
+        return value
+
+    def _signature(name: Any, args: Any) -> tuple[str, str]:
+        try:
+            canonical_args = json.dumps(_decoded(args), ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        except (TypeError, ValueError):
+            canonical_args = str(args)
+        return str(name or "tool"), canonical_args
+
+    def _inner_calls(name: Any, args: Any) -> list[tuple[str, Any]]:
+        decoded = _decoded(args)
+        if name == "tool_call" and isinstance(decoded, dict):
+            calls = decoded.get("calls")
+            if isinstance(calls, list):
+                return [
+                    (str(call.get("name") or "tool"), call.get("arguments", {}))
+                    for call in calls if isinstance(call, dict)
+                ]
+        return [(str(name or "tool"), decoded)]
+
+    results: dict[str, str] = {}
+    for msg in messages[last_user + 1:]:
+        if msg.get("role") != "tool":
+            continue
+        call_id = str(msg.get("tool_call_id") or "")
+        if call_id:
+            results[call_id] = flatten_message_text(msg.get("content"))
+
+    events: list[tuple[int, str, Any, str]] = []
+    for message_index, msg in enumerate(messages[last_user + 1:], start=last_user + 1):
+        if msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls") or []:
+            fn = _field(tc, "function")
+            outer_name = _field(fn, "name") or _field(tc, "name") or "tool"
+            outer_args = _field(fn, "arguments")
+            call_id = str(_field(tc, "id") or _field(tc, "call_id") or "")
+            result = results.get(call_id)
+            if result is None:
+                continue
+            for name, args in _inner_calls(outer_name, outer_args):
+                events.append((message_index, name, args, result))
+
+    writes = MUTATING_TOOL_NAMES
+    write_words = ("update", "create", "write", "patch", "delete", "append", "insert")
+    streaks: dict[tuple[str, str, str], list[int]] = {}
+    evidence: list[str] = []
+    for message_index, name, args, result in events:
+        lowered = name.lower()
+        is_write = name in writes or any(word in lowered for word in write_words)
+        if is_write:
+            failed, _ = classify_tool_failure(name, result)
+            if not failed and "[SKILL_PRUNED" not in result:
+                streaks.clear()
+            continue
+        if name == "process_manage" or is_stall_guard_repeatable(name):
+            continue
+        failed, _ = classify_tool_failure(name, result)
+        signature = _signature(name, args)
+        if failed or "[SKILL_PRUNED" in result:
+            for prior_key in [item for item in streaks if item[:2] == signature]:
+                streaks.pop(prior_key, None)
+            continue
+        result_hash = hashlib.sha256(result.encode("utf-8", "replace")).hexdigest()
+        key = (signature[0], signature[1], result_hash)
+        prior_keys = [item for item in streaks if item[:2] == signature and item != key]
+        for prior_key in prior_keys:
+            streaks.pop(prior_key, None)
+        indices = streaks.setdefault(key, [])
+        indices.append(message_index + 1)
+        if len(indices) == 3:
+            args_preview = str(_redact_reference_text(signature[1]))[:120]
+            evidence.append(
+                f"Hermes repeat evidence: {name} {args_preview} returned an identical result "
+                f"at tool-call messages {', '.join(map(str, indices))} with no write between them."
+            )
+    return "\n".join(evidence)
+
+
 def _reference_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Build the advisory (reference-model) view of the conversation.
 
@@ -751,9 +851,20 @@ def _reference_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 rendered.append({"role": "assistant", "content": block})
         # system and any other role are ignored.
 
+    evidence = _repeat_evidence(messages)
+    advisory_instruction = _ADVISORY_INSTRUCTION
+    if evidence:
+        advisory_instruction += f"\n\n[Hermes repeat evidence]\n{evidence}"
+
     # Anthropic rejects trailing assistant prefill: end on a synthetic user request.
+    # Keep evidence in this tail message so earlier cacheable messages stay stable.
     if rendered and rendered[-1].get("role") == "assistant":
-        rendered.append({"role": "user", "content": _ADVISORY_INSTRUCTION})
+        rendered.append({"role": "user", "content": advisory_instruction})
+    elif evidence:
+        rendered.extend([
+            {"role": "assistant", "content": f"[Hermes repeat evidence]\n{evidence}"},
+            {"role": "user", "content": advisory_instruction},
+        ])
     if not rendered:
         # Nothing rendered: fall back to the latest user turn.
         if last_user_content is not None:
@@ -1268,7 +1379,7 @@ class MoAChatCompletions:
             # count or the prefix would grow (and re-sign) every iteration.
             last_user = next(
                 (i for i in range(len(ref_messages) - 1, -1, -1)
-                 if ref_messages[i].get("role") == "user" and ref_messages[i].get("content") != _ADVISORY_INSTRUCTION),
+                 if ref_messages[i].get("role") == "user" and not str(ref_messages[i].get("content") or "").startswith(_ADVISORY_INSTRUCTION)),
                 None,
             )
             if last_user is not None:
@@ -1352,7 +1463,7 @@ class MoAChatCompletions:
 
     def _build_guidance(
         self, reference_outputs: list[tuple[str, str, Any]], aggregator: dict[str, Any], degraded_reference_policy: str,
-        stale: bool = False,
+        stale: bool = False, repeat_evidence: str = "",
     ) -> str | None:
         """Render the reference block attached to the aggregator prompt (None = nothing)."""
         agg_refs, degraded, all_failed = _guidance_inputs(
@@ -1379,14 +1490,16 @@ class MoAChatCompletions:
                 )
             return None
         if agg_refs or degraded:
+            evidence_block = f"[Hermes repeat evidence]\n{repeat_evidence}\n\n" if repeat_evidence else ""
             return (
                 f"{header}"
                 f"References: {', '.join(label for label, _, _ in agg_refs)}\n\n"
                 "Advisor guidance follows. You are the acting model. Before your next action:\n"
                 "1. Read each advisor's STATUS, NEXT, and AVOID lines.\n"
-                "2. If any STATUS is looping or off_track, do not repeat anything listed in AVOID; change approach or answer the user.\n"
+                "2. Treat STATUS: looping as a confirmed loop only when Hermes repeat evidence lists the same tool and arguments; otherwise treat it as a possible repeat.\n"
                 "3. If you do not follow NEXT, state why in one sentence first.\n"
                 f"{_STALE_GUIDANCE_NOTE if stale else ''}\n"
+                f"{evidence_block}"
                 f"{_join_reference_outputs(agg_refs, degraded)}"
             )
         return None
@@ -1430,6 +1543,7 @@ class MoAChatCompletions:
         guidance = self._build_guidance(
             reference_outputs, aggregator, str(preset.get("degraded_reference_policy") or "loud"),
             stale=cache_hit and _tool_activity_since_last_user(messages),
+            repeat_evidence=_repeat_evidence(messages),
         )
         if guidance:
             _attach_reference_guidance(agg_messages, guidance)
