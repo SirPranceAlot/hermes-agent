@@ -21,6 +21,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from agent.auxiliary_client import call_llm
+from agent.error_classifier import is_reasoning_field_rejection
 from agent.message_content import flatten_message_text
 from agent.moa_alternation import destination_key, is_role_alternation_rejection, merge_same_role_messages
 from agent.transports import get_transport
@@ -1027,6 +1028,9 @@ class MoAChatCompletions:
         # their aggregator requests are pre-merged; every other destination keeps the split,
         # cache-stable shape (agent/moa_alternation.py).
         self._merge_same_role_destinations: set[tuple[str, str]] = set()
+        # Destinations that 400'd on the reasoning field itself: their aggregator requests omit it
+        # (route default) for the rest of the session.
+        self._reasoning_rejected_destinations: set[tuple[str, str]] = set()
 
     def consume_reference_usage(self) -> tuple[Any, Any]:
         """Pop pending fan-out ``(CanonicalUsage, cost_usd_or_None)`` and reset both
@@ -1171,14 +1175,32 @@ class MoAChatCompletions:
         merged = destination in remembered
         if merged:
             agg_messages = merge_same_role_messages(agg_messages)
+        no_reasoning = getattr(self, "_reasoning_rejected_destinations", None)
+        if no_reasoning is None:
+            no_reasoning = self._reasoning_rejected_destinations = set()
+        # Same policy as direct create(), unless this destination already rejected the field.
+        reasoning_config = None if destination in no_reasoning else _aggregator_reasoning_config(aggregator)
         send = functools.partial(
             call_llm, task="moa_aggregator", temperature=prepared["aggregator_temperature"],
             max_tokens=api_kwargs.get("max_tokens"), tools=tools, extra_body=agg_extra_body,
-            reasoning_config=_aggregator_reasoning_config(aggregator),  # same policy as direct create()
             **stream_kwargs, **agg_runtime,
         )
         try:
-            agg_response = send(messages=agg_messages)
+            try:
+                agg_response = send(messages=agg_messages, reasoning_config=reasoning_config)
+            except Exception as exc:
+                # The streaming path skips call_llm's parameter ladder, and the main loop's
+                # _reasoning_effort_rejected never reaches this call: omit the reasoning field for
+                # this destination for the rest of the session (route default) and retry once.
+                if reasoning_config is None or not is_reasoning_field_rejection(str(exc)):
+                    raise
+                no_reasoning.add(destination)
+                logger.warning(
+                    "MoA aggregator %s rejected the reasoning field — omitting it for this destination "
+                    "for the rest of the session and retrying once: %.200s", _slot_label(aggregator), exc,
+                )
+                reasoning_config = None
+                agg_response = send(messages=agg_messages, reasoning_config=None)
         except Exception as exc:
             # Strict-alternation template rejected ``user(task), user(guidance)``: merge the pair for
             # THIS destination only and retry once; remember it so later iterations pre-merge.
@@ -1191,7 +1213,7 @@ class MoAChatCompletions:
                 "destination for the rest of the session and retrying once: %.200s", _slot_label(aggregator), exc,
             )
             agg_messages = retry_messages
-            agg_response = send(messages=agg_messages)
+            agg_response = send(messages=agg_messages, reasoning_config=reasoning_config)
         if trace is not None:
             # Trace the exact aggregator INPUT as sent (persisted copy redacted; live input raw).
             trace["aggregator_input_messages"] = (
