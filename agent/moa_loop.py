@@ -220,10 +220,12 @@ _REFERENCE_SYSTEM_PROMPT = (
     "NEXT: <one concrete next step, or \"answer the user now\">\n"
     "AVOID: <tool name + key argument that must not be repeated, or \"none\">\n"
     "Use STATUS: looping only when the Hermes repeat evidence block lists the call. "
-    "Otherwise, mention a possible repeat in your reasoning and keep STATUS on_track. "
-    "Use only exact tool arguments and identical full results as repeat evidence. "
-    "Do not count a read after a write, a retry after an error, a skill reload after "
-    "[SKILL_PRUNED], or a process poll as a loop."
+    "Otherwise, mention a possible repeat in your reasoning; a possible repeat alone "
+    "does not change STATUS. Use only exact tool arguments and identical full results "
+    "as repeat evidence. Do not count a read after a write, a retry after an error, a "
+    "skill reload after [SKILL_PRUNED], or a process poll as a loop. "
+    "Keep the explanation under 150 words unless more detail is needed. Include only "
+    "facts, risks, and conditions that can change the next action."
 )
 
 
