@@ -370,6 +370,7 @@ from hermes_cli.subcommands.config import build_config_parser
 from hermes_cli.subcommands.skin import build_skin_parser
 from hermes_cli.subcommands.console import build_console_parser
 from hermes_cli.subcommands.update import build_update_parser
+from hermes_cli.subcommands.update_fork import build_update_fork_parser
 from hermes_cli.subcommands.uninstall import build_uninstall_parser
 from hermes_cli.subcommands.dashboard import build_dashboard_parser, build_serve_parser
 from hermes_cli.subcommands.gui import build_gui_parser
@@ -2448,6 +2449,13 @@ def _update_preflight_handled(args) -> bool:
 from hermes_cli.update_receipt import update_receipt_scope
 
 
+def cmd_update_fork(args):
+    """Update a fork checkout with upstream (thin wrapper; see subcommands/update_fork.py)."""
+    from hermes_cli.subcommands.update_fork import run_update_fork
+
+    return run_update_fork(args)
+
+
 @update_receipt_scope()
 def cmd_update(args):
     """Update Hermes Agent: hangup protection + update lock around ``_cmd_update_impl``."""
@@ -2528,6 +2536,7 @@ def _coalesce_session_name_args(argv: list) -> list:
         "sessions", "insights", "update", "uninstall", "profile", "dashboard", "serve",
         "desktop", "gui", "honcho", "claw", "plugins", "security", "acp", "webhook", "peer",
         "memory", "dump", "debug", "backup", "import", "completion", "logs", "usage",
+        "update-fork",
     }
     _SESSION_FLAGS = {"-c", "--continue", "-r", "--resume"}
 
@@ -2854,6 +2863,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "send", "sessions", "setup",
         "skin", "skills", "slack", "status", "sync", "tools", "uninstall", "update",
         "usage", "vault",
+        "update-fork",
         "webhook", "whatsapp", "whatsapp-cloud", "worktree", "chat", "secrets", "security",
         "browser",
         "verify",
@@ -3490,6 +3500,7 @@ def _build_cli_parser():
     build_claw_parser(subparsers, cmd_claw=cmd_claw)
     build_vault_parser(subparsers)
     build_update_parser(subparsers, cmd_update=cmd_update)
+    build_update_fork_parser(subparsers, cmd_update_fork=cmd_update_fork)
     build_uninstall_parser(subparsers, cmd_uninstall=cmd_uninstall)
     build_acp_parser(subparsers, cmd_acp=cmd_acp)
     build_profile_parser(subparsers, cmd_profile=cmd_profile)
